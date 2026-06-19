@@ -1,5 +1,14 @@
 import json
-from collections import defaultdict
+import re
+from collections import Counter, defaultdict
+import time
+import gc
+import os
+# GPT-2-style pretokenization: optional leading space on words/numbers/punctuation.
+_PRETOKENIZE_PATTERN = re.compile(
+    r"'s|'t|'re|'ve|'m|'ll|'d| ?\w+| ?\d+| ?[^\s\w]+|\s+(?!\S)|\s+",
+    re.UNICODE,
+)
 
 # Special tokens stored as bytes in the vocab
 BOS_TOKEN = b"<bos>"
@@ -46,81 +55,127 @@ class Trie:
         return True
     
 
+
+    
+
 class BPE:
-    def __init__(self, target_vocab_size: int, dataset_path: str, tokenizer_path: str):
-        self.corpus = []
+    def __init__(self, target_vocab_size: int, chunk_size: int, dataset_path: str, tokenizer_path: str):
         self.target_vocab_size = target_vocab_size
         self.dataset_path = dataset_path
+        self.tokenizer_path = tokenizer_path
+        self.corpus = []
+        self.chunk_size = chunk_size
         self.vocab = set(SPECIAL_TOKENS)
         self.vocab_trie = Trie()
-        self._initialize_corpus()
-        self._train()
-        self._save_vocab(tokenizer_path)
+
+        if os.path.exists(self.tokenizer_path):
+            self._load_vocab(self.tokenizer_path)
+        else:
+            self._train()
+
 
     def _initialize_corpus(self):
-        """
-        Initialize the vocabulary.
-        """
-        with open(self.dataset_path, 'r') as f:
+        with open(self.dataset_path, "r") as f:
             for line in f:
                 text = json.loads(line)["text"]
-                word = [bytes([b]) for b in text.encode("utf-8")]
-                self.corpus.append(word)
-                self.vocab.update(word)
+                tokens = [bytes(token, "utf-8") for token in text]
+                self.corpus.append(tokens)
+                for token in tokens:
+                    self.vocab.add(token)
+    
+    def _count_pairs(self, chunk_idx: int = 0, chunk_size: int = 10000):
+        self.pair_positions = None
+        gc.collect()
+   
+        self.pair_positions = defaultdict(set)
+        for i, sequence in enumerate(self.corpus):
+            if i < chunk_idx:
+                continue
+            if i >= chunk_idx + chunk_size:
+                break
+            for j in range(len(sequence) - 1):
+                if sequence[j] is None or sequence[j + 1] is None:
+                    continue
+                self.pair_positions[(sequence[j], sequence[j + 1])].add((i, j))
 
-    def _count_pairs(self):
-        """
-        Count the frequency of pairs of tokens in the corpus.
-        """
-        pair_positions = defaultdict(set)
-        for word_idx, word in enumerate(self.corpus):
-            for i in range(len(word) - 1):
-                pair_positions[(word[i], word[i + 1])].add((word_idx, i))
-        return pair_positions
+    def _remove_pair_position(self, pair: tuple, seq_idx: int, pos_idx: int) -> None:
+        positions = self.pair_positions.get(pair)
+        if not positions:
+            return
+        positions.discard((seq_idx, pos_idx))
+        if not positions:
+            del self.pair_positions[pair]
 
     def _train(self):
         """
-        Train the BPE tokenizer.
+        Train the BPE model.
         """
-        pair_positions = self._count_pairs()
 
-        while len(self.vocab) < self.target_vocab_size:
-            pair = max(
-                (k for k, v in pair_positions.items() if v),
-                key=lambda x: len(pair_positions[x]),
-            )
-            new_token = pair[0] + pair[1]
-            self.vocab.add(new_token)
+        start_time = time.time()
+        self._initialize_corpus()
+        end_time = time.time()
+        print(f"Time taken for initializing corpus: {end_time - start_time} seconds")
 
-            for word_idx, i in sorted(pair_positions[pair], key=lambda x: (x[0], -x[1])):
-                word = self.corpus[word_idx]
-                if i >= len(word) - 1 or (word[i], word[i + 1]) != pair:
-                    continue
+        start_time = time.time()
+        chunk_num = len(self.corpus) // self.chunk_size
 
-                if i > 0:
-                    left_pair = (word[i - 1], pair[0])
-                    pair_positions[left_pair].discard((word_idx, i - 1))
-                    pair_positions[(word[i - 1], new_token)].add((word_idx, i - 1))
+        for chunk_idx in range(chunk_num):
+            start_time = time.time()
+            self._count_pairs(chunk_idx, self.chunk_size)
+            end_time = time.time()
+            print(f"Time taken for counting pairs: {end_time - start_time} seconds")
+            merges_per_chunk = self.target_vocab_size // chunk_num
+            for _ in range(merges_per_chunk):
+                if not self.pair_positions:
+                    break
+                print(f"Training BPE: {len(self.vocab)} / {self.target_vocab_size}")
+                pair = max(self.pair_positions, key=lambda p: len(self.pair_positions[p]))
+                all_pair_indices = self.pair_positions.pop(pair)
+                new_token = pair[0] + pair[1]
+                self.vocab.add(new_token)
+                for seq_idx, token_idx in all_pair_indices:
+                    sequence = self.corpus[seq_idx]
+                    if sequence[token_idx] != pair[0] or sequence[token_idx + 1] != pair[1]:
+                        continue
 
-                if i + 2 < len(word):
-                    right_pair = (pair[1], word[i + 2])
-                    pair_positions[right_pair].discard((word_idx, i + 1))
-                    pair_positions[(new_token, word[i + 2])].add((word_idx, i))
+                    left_idx = token_idx - 1 if token_idx > 0 else None
+                    while left_idx is not None and left_idx >= 0 and sequence[left_idx] is None:
+                        left_idx -= 1
+                    if left_idx is not None and left_idx < 0:
+                        left_idx = None
+                    left = sequence[left_idx] if left_idx is not None else None
 
-                word[i] = new_token
-                del word[i + 1]
+                    right_idx = token_idx + 2 if token_idx + 2 < len(sequence) else None
+                    while right_idx is not None and right_idx < len(sequence) and sequence[right_idx] is None:
+                        right_idx += 1
+                    if right_idx is not None and right_idx >= len(sequence):
+                        right_idx = None
+                    right = sequence[right_idx] if right_idx is not None else None
 
-            del pair_positions[pair]
+                    if left is not None:
+                        self._remove_pair_position((left, pair[0]), seq_idx, left_idx)
+                    if right is not None:
+                        self._remove_pair_position((pair[1], right), seq_idx, token_idx + 1)
 
-        base_tokens = sorted(self.vocab - SPECIAL_TOKENS)
-        sorted_vocab = sorted(SPECIAL_TOKENS) + base_tokens
+                    sequence[token_idx] = new_token
+                    sequence[token_idx + 1] = None
 
-        for token in sorted_vocab:
-            self.vocab_trie.insert(token)
+                    if left is not None:
+                        self.pair_positions[(left, new_token)].add((seq_idx, left_idx))
+                    if right is not None:
+                        self.pair_positions[(new_token, right)].add((seq_idx, token_idx))
 
-        self.id_to_word = dict(enumerate(sorted_vocab))
-        self.word_to_id = {word: i for i, word in enumerate(sorted_vocab)}
+        end_time = time.time()
+        print(f"Time taken for training: {end_time - start_time} seconds")
+        
+        self._save_vocab(self.tokenizer_path)
+        print(f"Vocab saved to {self.tokenizer_path}")
+        self._load_vocab(self.tokenizer_path)
 
+        # Garbage collection
+        self.corpus = None
+        self.pair_positions = None
+        gc.collect()
 
     def _save_vocab(self, path: str):
         with open(path, "w") as f:
@@ -172,10 +227,14 @@ class BPE:
 
 
 if __name__ == "__main__":
-    bpe = BPE(target_vocab_size=10000, dataset_path="src/data/openwebtext-100k.jsonl", tokenizer_path="src/tokenization/bpe_tokenizer.json")
-
-    print(bpe.encode("Hello, world!"))
-    print(bpe.decode([1, 2, 3, 4]))
-    print(bpe.encode("Hello, world!"))
-    print(bpe.decode([1, 2, 3, 4]))
-    print(bpe.encode("Hello, world!"))
+    bpe = BPE(target_vocab_size=10000, chunk_size=10000, dataset_path="src/data/openwebtext-100k.jsonl", tokenizer_path="src/tokenization/bpe_tokenizer.json")
+    start_time = time.time()
+    bpe._train()
+    end_time = time.time()
+    print(f"Time taken for training: {end_time - start_time} seconds")
+   
+    # print(bpe.encode("Hello, world!"))
+    # print(bpe.decode([1, 2, 3, 4]))
+    # print(bpe.encode("Hello, world!"))
+    # print(bpe.decode([1, 2, 3, 4]))
+    # print(bpe.encode("Hello, world!"))
