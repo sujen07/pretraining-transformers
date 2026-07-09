@@ -88,5 +88,5 @@ class Transformer(torch.nn.Module):
 
     def _create_mask(self, x: torch.Tensor):
         batch_size, seq_len = x.shape
-        mask = torch.tril(torch.ones(seq_len, seq_len), device=x.device).bool()
+        mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device)).bool()
         return mask
