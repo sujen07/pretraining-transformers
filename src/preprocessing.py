@@ -1,6 +1,7 @@
 from datasets import load_dataset
 import os
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
+from torch.utils.data.dataset import random_split
 import json
 import torch
 from tokenization.bpe import BPE, PAD_TOKEN
@@ -44,7 +45,9 @@ def _collate_fn(batch: list[list[int]], pad_id: int, seq_len: int = SEQ_LEN):
     for i, tokens in enumerate(batch):
         length = min(len(tokens), seq_len)
         batch_tensor[i, :length] = torch.tensor(tokens[:length], dtype=torch.long)
-    return batch_tensor
+    attention_mask = (batch_tensor != pad_id).float()
+    labels = batch_tensor[:, 1:].clone()
+    return {"input_ids": batch_tensor, "attention_mask": attention_mask, "labels": labels}
 
 
 def create_dataloader(dataset_path: str, bpe: BPE, batch_size: int, seq_len: int = SEQ_LEN):
@@ -52,19 +55,26 @@ def create_dataloader(dataset_path: str, bpe: BPE, batch_size: int, seq_len: int
     Create a dataloader from the JSONL file.
     """
     dataset = create_dataset(dataset_path, bpe)
+    train_dataset, val_dataset = random_split(dataset, [0.9, 0.1])
     pad_id = bpe.word_to_id[PAD_TOKEN]
-    dataloader = DataLoader(
-        dataset,
+    train_dataloader = DataLoader(
+        train_dataset,
         batch_size=batch_size,
         shuffle=True,
         collate_fn=lambda batch: _collate_fn(batch, pad_id, seq_len),
     )
-    return dataloader
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=lambda batch: _collate_fn(batch, pad_id, seq_len),
+    )
+    return train_dataloader, val_dataloader
 
 
 if __name__ == "__main__":
     #initial_load()
     bpe = BPE(target_vocab_size=10000, chunk_size=10000, dataset_path="src/data/openwebtext-100k.jsonl", tokenizer_path="src/tokenization/bpe_tokenizer.json")
     dataset = create_dataset("src/data/openwebtext-100k.jsonl", bpe)
-    dataloader = create_dataloader("src/data/openwebtext-100k.jsonl", bpe, batch_size=16, seq_len=SEQ_LEN)
+    train_dataloader, val_dataloader = create_dataloader("src/data/openwebtext-100k.jsonl", bpe, batch_size=16, seq_len=SEQ_LEN)
     print(dataset[0])
