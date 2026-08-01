@@ -29,11 +29,10 @@ class MultiHeadAttention(torch.nn.Module):
         k = k.view(batch_size, seq_len, self.num_heads, head_dim).transpose(1, 2)
         v = v.view(batch_size, seq_len, self.num_heads, head_dim).transpose(1, 2)
 
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(head_dim)
-        if mask is not None:
-            scores = scores.masked_fill(~mask, -float('inf'))
-        attn_weights = torch.softmax(scores, dim=-1)
-        attn_output = torch.matmul(attn_weights, v)
+        # is_causal already applies the autoregressive mask; attn_mask can't be set with it.
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, is_causal=True
+        )
         attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
         return self.o_proj(attn_output)
     
@@ -73,6 +72,7 @@ class Transformer(torch.nn.Module):
         self.pos_embedding = torch.nn.Embedding(max_seq_len, d_model)
         self.layer_norm = torch.nn.LayerNorm(d_model)
         self.linear = torch.nn.Linear(d_model, num_vocab)
+        self.linear.weight = self.embedding.weight
 
     def forward(self, x: torch.Tensor):
         mask = self._create_mask(x)
