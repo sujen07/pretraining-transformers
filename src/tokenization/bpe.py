@@ -90,15 +90,12 @@ class BPE:
         gc.collect()
    
         self.pair_positions = defaultdict(set)
-        for i, sequence in enumerate(self.corpus):
-            if i < chunk_idx:
-                continue
-            if i >= chunk_idx + chunk_size:
-                break
+        for i in range(chunk_idx, min(chunk_idx + chunk_size, len(self.corpus))):
+            sequence = self.corpus[i]
             for j in range(len(sequence) - 1):
                 if sequence[j] is None or sequence[j + 1] is None:
                     continue
-                self.pair_positions[(sequence[j], sequence[j + 1])].add((i, j))
+                self.pair_positions[(sequence[j], sequence[j + 1])].add((i, j))   
 
     def _remove_pair_position(self, pair: tuple, seq_idx: int, pos_idx: int) -> None:
         positions = self.pair_positions.get(pair)
@@ -125,7 +122,7 @@ class BPE:
 
         for chunk_idx in range(chunk_num):
             start_time = time.time()
-            self._count_pairs(chunk_idx, self.chunk_size)
+            self._count_pairs(chunk_idx*self.chunk_size, self.chunk_size)
             end_time = time.time()
             print(f"Time taken for counting pairs: {end_time - start_time} seconds")
             merges_per_chunk = self.target_vocab_size // chunk_num
@@ -140,7 +137,13 @@ class BPE:
                 self.merges.append((pair[0], pair[1]))
                 for seq_idx, token_idx in all_pair_indices:
                     sequence = self.corpus[seq_idx]
-                    if sequence[token_idx] != pair[0] or sequence[token_idx + 1] != pair[1]:
+                    if token_idx >= len(sequence) or sequence[token_idx] != pair[0]:
+                        continue
+                    # The mate may sit past None holes left by earlier merges.
+                    mate_idx = token_idx + 1
+                    while mate_idx < len(sequence) and sequence[mate_idx] is None:
+                        mate_idx += 1
+                    if mate_idx >= len(sequence) or sequence[mate_idx] != pair[1]:
                         continue
 
                     left_idx = token_idx - 1 if token_idx > 0 else None
@@ -150,7 +153,7 @@ class BPE:
                         left_idx = None
                     left = sequence[left_idx] if left_idx is not None else None
 
-                    right_idx = token_idx + 2 if token_idx + 2 < len(sequence) else None
+                    right_idx = mate_idx + 1 if mate_idx + 1 < len(sequence) else None
                     while right_idx is not None and right_idx < len(sequence) and sequence[right_idx] is None:
                         right_idx += 1
                     if right_idx is not None and right_idx >= len(sequence):
@@ -160,10 +163,10 @@ class BPE:
                     if left is not None:
                         self._remove_pair_position((left, pair[0]), seq_idx, left_idx)
                     if right is not None:
-                        self._remove_pair_position((pair[1], right), seq_idx, token_idx + 1)
+                        self._remove_pair_position((pair[1], right), seq_idx, mate_idx)
 
                     sequence[token_idx] = new_token
-                    sequence[token_idx + 1] = None
+                    sequence[mate_idx] = None
 
                     if left is not None:
                         self.pair_positions[(left, new_token)].add((seq_idx, left_idx))
@@ -292,11 +295,8 @@ class BPE:
 
 
 if __name__ == "__main__":
-    bpe = BPE(target_vocab_size=10000, chunk_size=10000, dataset_path="src/data/openwebtext-100k.jsonl", tokenizer_path="src/tokenization/bpe_tokenizer.json")
-    # start_time = time.time()
-    # bpe._train()
-    # end_time = time.time()
-    # print(f"Time taken for training: {end_time - start_time} seconds")
+    bpe = BPE(target_vocab_size=30000, chunk_size=10000, dataset_path="src/data/openwebtext-100k.jsonl", tokenizer_path="src/tokenization/bpe_tokenizer.json")
+
    
     print(f"vocab size: {len(bpe.vocab)}")
     print(f"merges: {len(bpe.merges)} (canonical BPE={'yes' if bpe.merge_ranks else 'no — greedy fallback'})")
